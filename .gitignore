@@ -1,0 +1,18 @@
+# Zig build artifacts
+.zig-cache/
+zig-out/
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# Generated output (rebuild with `zig build run` then `.venv/bin/python plot.py`)
+out/
+figs/
+
+# Editor / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
