@@ -83,6 +83,24 @@ fn write_field(io: Io, path: []const u8, field: []const f64, meta: FieldMeta) !v
     try w.flush();
 }
 
+// Walls and corners of a field, shared by every solver so boundaries are set one way.
+// Leaves the interior untouched.
+fn set_boundaries(field: []f64) void {
+    for (0..IMAX) |i| {
+        field[idx(i, JMAX - 1)] = T_3; // top
+        field[idx(i, 0)] = T_1; // bottom
+    }
+    for (0..JMAX) |j| {
+        field[idx(0, j)] = T_2; // left
+        field[idx(IMAX - 1, j)] = T_4; // right
+    }
+    // Corners: average of the two adjacent walls (not used by the stencil)
+    field[idx(0, 0)] = (T_1 + T_2) / 2.0; // bottom-left
+    field[idx(IMAX - 1, 0)] = (T_1 + T_4) / 2.0; // bottom-right
+    field[idx(0, JMAX - 1)] = (T_3 + T_2) / 2.0; // top-left
+    field[idx(IMAX - 1, JMAX - 1)] = (T_3 + T_4) / 2.0; // top-right
+}
+
 const Status = enum { converged, diverged, step_limit };
 
 const FtcsResult = struct {
@@ -99,19 +117,7 @@ fn ftcs_solve(io: Io, dt: f64, nodes: []f64, nodes_swap: []f64) !FtcsResult {
 
     // Boundaries live in both buffers so the swap never reads stale edges
     @memset(nodes, T_0);
-    for (0..IMAX) |i| {
-        nodes[idx(i, JMAX - 1)] = T_3; // top
-        nodes[idx(i, 0)] = T_1; // bottom
-    }
-    for (0..JMAX) |j| {
-        nodes[idx(0, j)] = T_2; // left
-        nodes[idx(IMAX - 1, j)] = T_4; // right
-    }
-    // Corners: average of the two adjacent walls (not used by the stencil)
-    nodes[idx(0, 0)] = (T_1 + T_2) / 2.0; // bottom-left
-    nodes[idx(IMAX - 1, 0)] = (T_1 + T_4) / 2.0; // bottom-right
-    nodes[idx(0, JMAX - 1)] = (T_3 + T_2) / 2.0; // top-left
-    nodes[idx(IMAX - 1, JMAX - 1)] = (T_3 + T_4) / 2.0; // top-right
+    set_boundaries(nodes);
     @memcpy(nodes_swap, nodes);
 
     std.debug.print("=== FTCS dt = {d} s ===\n", .{dt});
@@ -194,6 +200,51 @@ fn ftcs_solve(io: Io, dt: f64, nodes: []f64, nodes_swap: []f64) !FtcsResult {
     return .{ .field = current, .steps = step, .status = status };
 }
 
+// sinh(a) / sinh(b) without overflow; needs 0 <= a <= b and b > 0.
+// Uses sinh(x) = e^x (1 - e^(-2x)) / 2, so every exponent is <= 0.
+fn sinh_ratio(a: f64, b: f64) f64 {
+    return @exp(a - b) * (1.0 - @exp(-2.0 * a)) / (1.0 - @exp(-2.0 * b));
+}
+
+fn analytical_solution(alloc: std.mem.Allocator, length: f64, width: f64, t_bottom: f64, t_top: f64, dxloc: f64, dyloc: f64) ![]f64 {
+    comptime if (T_2 != 0.0 or T_4 != 0) {
+        @compileError("This is an invalid solution when T_2 or T_4 are non zero!");
+    };
+    // analytical is continuous but we want to compare to other methods so we evaluate at the same node locations
+    const nodes: []f64 = alloc.alloc(f64, IMAX * JMAX) catch |err| {
+        std.debug.print("Error allocating memory for analytical nodes matching numerical methods: {}\n", .{err});
+        return err;
+    }; // C
+    set_boundaries(nodes);
+    const pi: f64 = std.math.pi;
+    const exit_tolerance: f64 = 1e-8; // very small change relative to the FTCS or ADI
+    for (1..JMAX - 1) |j| {
+        for (1..IMAX - 1) |i| {
+            const k = idx(i, j);
+            const x = dxloc * @as(f64, @floatFromInt(i)); // m
+            const y = dyloc * @as(f64, @floatFromInt(j)); // m
+            var T_a: f64 = 0.0; // C
+            var T_b: f64 = 0.0; // C
+            var tolerance = std.math.floatMax(f64);
+            var m: f64 = 1.0;
+            // Odd m only: 1 - cos(m pi) is 2 for odd m and 0 for even m (which would also
+            // zero the bound below and stop the loop after one term), so 4 T / (m pi) is the amplitude
+            while (tolerance > exit_tolerance) : (m += 2.0) {
+                const b = m * pi * width / length; // shared sinh denominator argument
+                const bound_a = 4.0 * t_bottom / (m * pi) * sinh_ratio(m * pi * (width - y) / length, b);
+                const bound_b = 4.0 * t_top / (m * pi) * sinh_ratio(m * pi * y / length, b);
+                const shape = std.math.sin(m * pi * x / length);
+                T_a += bound_a * shape;
+                T_b += bound_b * shape;
+                // bound excludes the sine so a node where sin = 0 can't end the loop early
+                tolerance = @max(@abs(bound_a), @abs(bound_b));
+            }
+            nodes[k] = T_a + T_b;
+        }
+    }
+    return nodes;
+}
+
 pub fn main(init: std.process.Init) !void {
     // Print constants
     std.debug.print(
@@ -229,17 +280,35 @@ pub fn main(init: std.process.Init) !void {
     const ftcs_nodes: []f64 = allocator.alloc(f64, IMAX * JMAX) catch |err| {
         std.debug.print("Error allocating memory for ftcs_nodes: {}\n", .{err});
         return err;
-    }; //m
+    }; // C
     const ftcs_nodes_swap: []f64 = allocator.alloc(f64, IMAX * JMAX) catch |err| {
         std.debug.print("Error allocating memory for ftcs_nodes_swap: {}\n", .{err});
         return err;
-    }; //m
+    }; // C
 
     for (ftcs_step_sz) |dt| {
         const result = try ftcs_solve(io, dt, ftcs_nodes, ftcs_nodes_swap);
         print_grid(result.field);
     }
-
+    const res_nodes_analytical = try analytical_solution(
+        allocator,
+        L,
+        W,
+        T_1,
+        T_3,
+        dx,
+        dy,
+    );
+    std.debug.print("Analytical Steady State Solution\n", .{});
+    print_grid(res_nodes_analytical);
+    write_field(
+        io,
+        "out/analytical.csv",
+        res_nodes_analytical,
+        .{ .method = "analytical", .dt = 0, .t = 0 },
+    ) catch |err| {
+        std.debug.print("Failed to write analytical field of nodes to csv. Error: {}\n", .{err});
+    };
     // ADI INIT
 
     // Run methods
