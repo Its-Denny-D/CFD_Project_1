@@ -244,6 +244,129 @@ fn analytical_solution(alloc: std.mem.Allocator, length: f64, width: f64, t_bott
     }
     return nodes;
 }
+// Solves Ax = d for tridiagonal A, in O(n) instead of O(n^3) for Gaussian elimination.
+// x contains d on entry and is overwritten with the solution.
+// Row i of A is: a[i] x[i-1] + b[i] x[i] + c[i] x[i+1] = d[i].
+// Only the first n = x.len entries of a, b, c and scratch are used, so the arrays may be
+// longer; a[0] and c[n-1] are never read. scratch holds the modified superdiagonal.
+// Stable without pivoting for diagonally dominant matrices.
+// WARNING: does not handle periodic boundary conditions; see the Sherman-Morrison formula
+// https://en.wikipedia.org/wiki/Tridiagonal_matrix_algorithm
+fn thomas(x: []f64, a: []const f64, b: []const f64, c: []const f64, scratch: []f64) !void {
+    const n = x.len;
+    if (n == 0) return error.EmptySystem;
+    if (a.len < n or b.len < n or c.len < n or scratch.len < n) return error.LengthMismatch;
+
+    // Forward sweep. Row 0 has no subdiagonal term, so it is handled before the loop.
+    scratch[0] = c[0] / b[0];
+    x[0] = x[0] / b[0];
+    for (1..n) |i| {
+        const denom = b[i] - a[i] * scratch[i - 1];
+        if (i < n - 1) {
+            scratch[i] = c[i] / denom; // B-8
+        }
+        x[i] = (x[i] - a[i] * x[i - 1]) / denom; // B-9
+    }
+
+    // Back substitution, counting down from n - 2. x[i] already holds the forward-sweep
+    // value; the countdown is a while loop because an unsigned index can't go below 0.
+    var i: usize = n - 1;
+    while (i > 0) {
+        i -= 1;
+        x[i] -= scratch[i] * x[i + 1]; // B-5
+    }
+}
+
+const testing = std.testing;
+
+test "Thomas: dimensions" {
+    var x: [2]f64 = .{ 8.0, 8.0 };
+    const b: [1]f64 = .{4.0}; // shorter than x
+    const c: [2]f64 = .{ 0.0, 0.0 };
+    const a: [2]f64 = .{ 0.0, 0.0 };
+    var scratch: [2]f64 = .{ 0.0, 0.0 };
+    try testing.expectError(
+        error.LengthMismatch,
+        thomas(&x, &a, &b, &c, &scratch),
+    );
+}
+
+test "Thomas: empty system" {
+    var x: [0]f64 = .{};
+    const a: [0]f64 = .{};
+    const b: [0]f64 = .{};
+    const c: [0]f64 = .{};
+    var scratch: [0]f64 = .{};
+    try testing.expectError(
+        error.EmptySystem,
+        thomas(&x, &a, &b, &c, &scratch),
+    );
+}
+
+test "Thomas: trivial n of 1 case" {
+    var x: [1]f64 = .{8.0};
+    const b: [1]f64 = .{4.0};
+    const c: [1]f64 = .{0.0};
+    const a: [1]f64 = .{0.0};
+    var scratch: [1]f64 = .{0.0};
+    try thomas(&x, &a, &b, &c, &scratch);
+    try testing.expectEqual(2.0, x[0]); // exact in floating point
+}
+
+test "Thomas: 2x2 system" {
+    // [2 1; 1 2] x = [3; 3]  ->  x = [1; 1]
+    var x: [2]f64 = .{ 3.0, 3.0 };
+    const b: [2]f64 = .{ 2.0, 2.0 };
+    const c: [2]f64 = .{ 1.0, 0.0 };
+    const a: [2]f64 = .{ 0.0, 1.0 };
+    var scratch: [2]f64 = undefined;
+    try thomas(&x, &a, &b, &c, &scratch);
+    try testing.expectApproxEqAbs(1.0, x[0], 1e-12);
+    try testing.expectApproxEqAbs(1.0, x[1], 1e-12);
+}
+
+test "Thomas: 4x4 system" {
+    var x: [4]f64 = .{ 1.0, -14, 26.5, 5 };
+    const b: [4]f64 = .{ 5.0, 6.0, 7.0, 4.0 };
+    const c: [4]f64 = .{ 2.0, -1.0, 3.0, 0.0 };
+    const a: [4]f64 = .{ 0.0, 1, -2, 1 };
+    var scratch: [4]f64 = undefined;
+    try thomas(&x, &a, &b, &c, &scratch);
+    const expected = [_]f64{ 1, -2, 3, 0.5 };
+    for (0..x.len) |i| {
+        try testing.expectApproxEqAbs(expected[i], x[i], 1e-12);
+    }
+}
+
+test "Thomas: linear steady heat profile" {
+    // -T[i-1] + 2 T[i] - T[i+1] = 0 inside, with T[0] = 40 and T[n-1] = 10.
+    // The exact answer is linear: T[i] = 40 - 30 i / (n - 1).
+    const n = 9;
+    var x: [n]f64 = undefined;
+    var a: [n]f64 = undefined;
+    var b: [n]f64 = undefined;
+    var c: [n]f64 = undefined;
+    var scratch: [n]f64 = undefined;
+    for (0..n) |i| {
+        a[i] = -1.0;
+        b[i] = 2.0;
+        c[i] = -1.0;
+        x[i] = 0.0;
+    }
+    // wall rows: identity, so x[0] = 40 and x[n-1] = 10
+    a[0] = 0.0;
+    b[0] = 1.0;
+    c[0] = 0.0;
+    x[0] = 40.0;
+    a[n - 1] = 0.0;
+    b[n - 1] = 1.0;
+    x[n - 1] = 10.0;
+    try thomas(&x, &a, &b, &c, &scratch);
+    for (0..n) |i| {
+        const exact = 40.0 - 30.0 * @as(f64, @floatFromInt(i)) / @as(f64, @floatFromInt(n - 1));
+        try testing.expectApproxEqAbs(exact, x[i], 1e-10);
+    }
+}
 
 pub fn main(init: std.process.Init) !void {
     // Print constants
@@ -309,10 +432,6 @@ pub fn main(init: std.process.Init) !void {
     ) catch |err| {
         std.debug.print("Failed to write analytical field of nodes to csv. Error: {}\n", .{err});
     };
-    // ADI INIT
-
-    // Run methods
-
-    // Print To File
+    // ADI
 
 }
