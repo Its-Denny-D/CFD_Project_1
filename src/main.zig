@@ -103,14 +103,98 @@ fn set_boundaries(field: []f64) void {
 
 const Status = enum { converged, diverged, step_limit };
 
-const FtcsResult = struct {
+const SolveResult = struct {
     field: []f64, // newest field, always the buffer `current` ended on
     steps: usize,
     status: Status,
 };
 
+const STEP_LIMIT: usize = 10000;
+const snap_times = [_]f64{ t_0_steady, t_1_steady };
+
+// Files every solver writes, identical in format so plot.py treats FTCS and ADI alike:
+//   <method>_dt<dt>_t0.csv, _t10.csv / _t40.csv snapshots, _history.csv, and the end field
+//   (_steady.csv when converged, otherwise named by status).
+// Initialize in place with open(): hist_fw points into hist_buf, so the struct must not be
+// copied or moved afterwards.
+const RunOutput = struct {
+    io: Io,
+    method: []const u8,
+    dt: f64,
+    snap_steps: [snap_times.len]usize,
+    path_buf: [128]u8,
+    hist_file: Io.File,
+    hist_buf: [4096]u8,
+    hist_fw: Io.File.Writer,
+
+    // Writes the t = 0 field and opens the history file with its header and step-0 row
+    fn open(self: *RunOutput, io: Io, method: []const u8, dt: f64, initial: []const f64) !void {
+        self.io = io;
+        self.method = method;
+        self.dt = dt;
+        try write_field(io, try self.path("t0"), initial, .{ .method = method, .dt = dt, .t = 0.0 });
+
+        // Snapshot steps from snapshot times; integer compare, never step * dt == t
+        for (snap_times, &self.snap_steps) |t, *s| s.* = @intFromFloat(@round(t / dt));
+
+        self.hist_file = try Io.Dir.cwd().createFile(io, try self.path("history"), .{});
+        errdefer self.hist_file.close(io);
+        self.hist_fw = self.hist_file.writer(io, &self.hist_buf);
+        const hist = &self.hist_fw.interface;
+        try hist.writeAll("step,t");
+        for (probes) |p| try hist.print(",{s}", .{p.name});
+        try hist.writeAll(",tv\n");
+        // Step 0: initial condition, empty tv (reads as NaN)
+        try hist.writeAll("0,0e0");
+        for (probes) |p| try hist.print(",{e}", .{initial[idx(p.i, p.j)]});
+        try hist.writeAll(",\n");
+    }
+
+    fn close(self: *RunOutput) void {
+        self.hist_file.close(self.io);
+    }
+
+    // OUT_DIR/<method>_dt<dt>_<tag>.csv, valid until the next call
+    fn path(self: *RunOutput, tag: []const u8) ![]u8 {
+        return std.fmt.bufPrint(&self.path_buf, OUT_DIR ++ "/{s}_dt{d}_{s}.csv", .{ self.method, self.dt, tag });
+    }
+
+    // One history row per step, plus a snapshot file when step hits a snapshot time
+    fn logStep(self: *RunOutput, step: usize, field: []const f64, tv: f64) !void {
+        const t = @as(f64, @floatFromInt(step)) * self.dt;
+        const hist = &self.hist_fw.interface;
+        try hist.print("{d},{e}", .{ step, t });
+        for (probes) |p| try hist.print(",{e}", .{field[idx(p.i, p.j)]});
+        try hist.print(",{e}\n", .{tv});
+
+        // Name and tag snapshots with the exact snapshot time, not step * dt
+        for (self.snap_steps, snap_times) |s, snap_t| {
+            if (step == s) {
+                var tag_buf: [32]u8 = undefined;
+                const tag = try std.fmt.bufPrint(&tag_buf, "t{d}", .{snap_t});
+                try write_field(self.io, try self.path(tag), field, .{ .method = self.method, .dt = self.dt, .t = snap_t });
+            }
+        }
+    }
+
+    // Flushes the history, reports how the run ended and writes the end field
+    fn finish(self: *RunOutput, status: Status, step: usize, field: []const f64) !void {
+        try self.hist_fw.interface.flush();
+
+        const t_end = @as(f64, @floatFromInt(step)) * self.dt;
+        switch (status) {
+            .converged => std.debug.print("Converged after {d} steps (t = {d} s)\n", .{ step, t_end }),
+            .diverged => std.debug.print("Diverged after {d} steps (t = {d} s)\n", .{ step, t_end }),
+            .step_limit => std.debug.print("Hit step limit of {d} steps (t = {d} s)\n", .{ STEP_LIMIT, t_end }),
+        }
+
+        const end_tag = if (status == .converged) "steady" else @tagName(status);
+        try write_field(self.io, try self.path(end_tag), field, .{ .method = self.method, .dt = self.dt, .t = t_end });
+    }
+};
+
 // Explicit FTCS solver for one time step size dt
-fn ftcs_solve(io: Io, dt: f64, nodes: []f64, nodes_swap: []f64) !FtcsResult {
+fn ftcs_solve(io: Io, dt: f64, nodes: []f64, nodes_swap: []f64) !SolveResult {
     // Fourier numbers, computed once before the loop
     const dx_coef: f64 = Thermal_diffusivity * dt / (dx * dx);
     const dy_coef: f64 = Thermal_diffusivity * dt / (dy * dy);
@@ -124,32 +208,13 @@ fn ftcs_solve(io: Io, dt: f64, nodes: []f64, nodes_swap: []f64) !FtcsResult {
     std.debug.print("Stability: d_x + d_y = {d:.3} (limit 0.5)\n", .{dx_coef + dy_coef});
     print_grid(nodes);
 
-    var path_buf: [128]u8 = undefined;
-    try write_field(io, try std.fmt.bufPrint(&path_buf, OUT_DIR ++ "/ftcs_dt{d}_t0.csv", .{dt}), nodes, .{ .method = "ftcs", .dt = dt, .t = 0.0 });
-
-    // Snapshot steps from snapshot times; integer compare, never step * dt == t
-    const snap_times = [_]f64{ t_0_steady, t_1_steady };
-    var snap_steps: [snap_times.len]usize = undefined;
-    for (snap_times, &snap_steps) |t, *s| s.* = @intFromFloat(@round(t / dt));
-
-    // History file stays open for the whole run
-    const hist_file = try Io.Dir.cwd().createFile(io, try std.fmt.bufPrint(&path_buf, OUT_DIR ++ "/ftcs_dt{d}_history.csv", .{dt}), .{});
-    defer hist_file.close(io);
-    var hist_buf: [4096]u8 = undefined;
-    var hist_fw = hist_file.writer(io, &hist_buf);
-    const hist = &hist_fw.interface;
-    try hist.writeAll("step,t");
-    for (probes) |p| try hist.print(",{s}", .{p.name});
-    try hist.writeAll(",tv\n");
-    // Step 0: initial condition, empty tv (reads as NaN)
-    try hist.writeAll("0,0e0");
-    for (probes) |p| try hist.print(",{e}", .{nodes[idx(p.i, p.j)]});
-    try hist.writeAll(",\n");
+    var out: RunOutput = undefined;
+    try out.open(io, "ftcs", dt, nodes);
+    defer out.close();
 
     var current = nodes;
     var next = nodes_swap;
     var step: usize = 0;
-    const step_limit: usize = 10000;
     const status: Status = while (true) {
         var tv: f64 = 0.0;
         for (1..JMAX - 1) |j| {
@@ -165,38 +230,14 @@ fn ftcs_solve(io: Io, dt: f64, nodes: []f64, nodes_swap: []f64) !FtcsResult {
         // swap so `current` always holds the newest step
         std.mem.swap([]f64, &current, &next);
         step += 1;
-        const t = @as(f64, @floatFromInt(step)) * dt;
-
-        try hist.print("{d},{e}", .{ step, t });
-        for (probes) |p| try hist.print(",{e}", .{current[idx(p.i, p.j)]});
-        try hist.print(",{e}\n", .{tv});
-
-        // Name and tag snapshots with the exact snapshot time, not step * dt
-        for (snap_steps, snap_times) |s, snap_t| {
-            if (step == s) {
-                const path = try std.fmt.bufPrint(&path_buf, OUT_DIR ++ "/ftcs_dt{d}_t{d}.csv", .{ dt, snap_t });
-                try write_field(io, path, current, .{ .method = "ftcs", .dt = dt, .t = snap_t });
-            }
-        }
+        try out.logStep(step, current, tv);
 
         if (!std.math.isFinite(tv)) break .diverged;
         if (tv < CONSS) break .converged;
-        if (step == step_limit) break .step_limit;
+        if (step == STEP_LIMIT) break .step_limit;
     };
-    try hist.flush();
 
-    const t_end = @as(f64, @floatFromInt(step)) * dt;
-    switch (status) {
-        .converged => std.debug.print("Converged after {d} steps (t = {d} s)\n", .{ step, t_end }),
-        .diverged => std.debug.print("Diverged after {d} steps (t = {d} s)\n", .{ step, t_end }),
-        .step_limit => std.debug.print("Hit step limit of {d} steps (t = {d} s)\n", .{ step_limit, t_end }),
-    }
-
-    // End field: ftcs_dt0.2_steady.csv when converged, otherwise named by status
-    const end_tag = if (status == .converged) "steady" else @tagName(status);
-    const end_path = try std.fmt.bufPrint(&path_buf, OUT_DIR ++ "/ftcs_dt{d}_{s}.csv", .{ dt, end_tag });
-    try write_field(io, end_path, current, .{ .method = "ftcs", .dt = dt, .t = t_end });
-
+    try out.finish(status, step, current);
     return .{ .field = current, .steps = step, .status = status };
 }
 
@@ -368,6 +409,147 @@ test "Thomas: linear steady heat profile" {
     }
 }
 
+test "Thomas: linear profile, walls folded into d" {
+    // The setup the ADI sweeps use: interior unknowns only, wall values added into d.
+    // 7 interior nodes between walls at 40 and 10, so T_i = 40 - 30 (i + 1) / 8.
+    const n = 7;
+    var x: [n]f64 = undefined;
+    var a: [n]f64 = undefined;
+    var b: [n]f64 = undefined;
+    var c: [n]f64 = undefined;
+    var scratch: [n]f64 = undefined;
+    for (0..n) |i| {
+        a[i] = -1.0;
+        b[i] = 2.0;
+        c[i] = -1.0;
+        x[i] = 0.0;
+    }
+    a[0] = 0.0;
+    c[n - 1] = 0.0;
+    x[0] = 40.0; // -a * T_wall moved to the right-hand side
+    x[n - 1] = 10.0;
+    try thomas(&x, &a, &b, &c, &scratch);
+    for (0..n) |i| {
+        const exact = 40.0 - 30.0 * @as(f64, @floatFromInt(i + 1)) / 8.0;
+        try testing.expectApproxEqAbs(exact, x[i], 1e-10);
+    }
+}
+
+fn LineBuffers(comptime N: usize) type {
+    return struct {
+        const Self = @This();
+        a: [N]f64 = undefined,
+        b: [N]f64 = undefined,
+        c: [N]f64 = undefined,
+        d: [N]f64 = undefined,
+        scratch: [N]f64 = undefined,
+        fn zero(self: *Self) void {
+            @memset(&self.a, 0.0);
+            @memset(&self.b, 0.0);
+            @memset(&self.c, 0.0);
+            @memset(&self.d, 0.0);
+            @memset(&self.scratch, 0.0);
+        }
+    };
+}
+// ADI solver for one time step size dt, using three field buffers:
+//   current: the field at step n
+//   star:    the half-step field T* after the x-sweep
+//   next:    the field at step n + 1 after the y-sweep
+// current and next are swapped each step, so they are local copies of the parameters
+// (parameters are immutable in Zig). Read the final field from SolveResult.field.
+// Uses the file-scope grid and boundary constants. MVP; parameterize if this gets refactored.
+fn adi_solve(io: Io, dt: f64, nodes: []f64, star: []f64, nodes_next: []f64) !SolveResult {
+    std.debug.assert(nodes.len == IMAX * JMAX and star.len == nodes.len and nodes_next.len == nodes.len);
+    var current = nodes;
+    var next = nodes_next;
+
+    // set constants
+    const nx = IMAX - 2;
+    const ny = JMAX - 2;
+    const d1: f64 = Thermal_diffusivity * 0.5 * dt / (dx * dx);
+    const d2: f64 = Thermal_diffusivity * 0.5 * dt / (dy * dy);
+
+    // init line buffers
+    var x_lines: LineBuffers(nx) = .{};
+    var y_lines: LineBuffers(ny) = .{};
+
+    // Boundaries live in all three buffers so the sweeps and the swap never read stale edges
+    @memset(current, T_0);
+    set_boundaries(current);
+    @memcpy(next, current);
+    @memcpy(star, current);
+
+    std.debug.print("=== ADI dt = {d} s ===\n", .{dt});
+    std.debug.print("Half-step coefficients: d1 = {d:.3}, d2 = {d:.3} (unconditionally stable)\n", .{ d1, d2 });
+    print_grid(current);
+
+    // setup RunOutput for results
+    var out: RunOutput = undefined;
+    try out.open(io, "adi", dt, current);
+    defer out.close();
+
+    // init x_lines (k is the line index, not the grid column)
+    for (0..nx) |k| {
+        x_lines.a[k] = -d1;
+        x_lines.c[k] = -d1;
+        x_lines.b[k] = 1.0 + 2.0 * d1;
+    }
+    // a[0] and c[n-1] are never read by thomas; zeroed by convention
+    x_lines.a[0] = 0.0;
+    x_lines.c[nx - 1] = 0.0;
+    // init y_lines
+    for (0..ny) |k| {
+        y_lines.a[k] = -d2;
+        y_lines.c[k] = -d2;
+        y_lines.b[k] = 1.0 + 2.0 * d2;
+    }
+    // a[0] and c[n-1] are never read by thomas; zeroed by convention
+    y_lines.a[0] = 0.0;
+    y_lines.c[ny - 1] = 0.0;
+    var step: usize = 0;
+    const status: Status = while (true) {
+        var TV: f64 = 0.0;
+        // x-sweep: implicit in x, explicit in y, one interior row at a time
+        for (1..JMAX - 1) |j| {
+            for (0..nx) |k| {
+                const i = k + 1;
+                x_lines.d[k] = d2 * current[idx(i, j - 1)] + (1 - 2 * d2) * current[idx(i, j)] + d2 * current[idx(i, j + 1)];
+            }
+            x_lines.d[0] += d1 * star[idx(0, j)]; // left wall
+            x_lines.d[nx - 1] += d1 * star[idx(IMAX - 1, j)]; // right wall
+            try thomas(&x_lines.d, &x_lines.a, &x_lines.b, &x_lines.c, &x_lines.scratch);
+            for (0..nx) |k| {
+                star[idx(k + 1, j)] = x_lines.d[k];
+            }
+        }
+        // y-sweep: implicit in y, explicit in x, one interior column at a time
+        for (1..IMAX - 1) |i| {
+            for (0..ny) |k| {
+                const j = k + 1;
+                y_lines.d[k] = d1 * star[idx(i - 1, j)] + (1 - 2 * d1) * star[idx(i, j)] + d1 * star[idx(i + 1, j)];
+            }
+            y_lines.d[0] += d2 * next[idx(i, 0)]; // bottom wall
+            y_lines.d[ny - 1] += d2 * next[idx(i, JMAX - 1)]; // top wall
+            try thomas(&y_lines.d, &y_lines.a, &y_lines.b, &y_lines.c, &y_lines.scratch);
+            for (0..ny) |k| {
+                next[idx(i, k + 1)] = y_lines.d[k];
+                TV += @abs(next[idx(i, k + 1)] - current[idx(i, k + 1)]);
+            }
+        }
+        std.mem.swap([]f64, &current, &next);
+        step += 1;
+        try out.logStep(step, current, TV);
+
+        if (!std.math.isFinite(TV)) break .diverged;
+        if (TV < CONSS) break .converged;
+        if (step == STEP_LIMIT) break .step_limit;
+    };
+
+    try out.finish(status, step, current);
+    return .{ .field = current, .status = status, .steps = step };
+}
+
 pub fn main(init: std.process.Init) !void {
     // Print constants
     std.debug.print(
@@ -399,7 +581,7 @@ pub fn main(init: std.process.Init) !void {
     try Io.Dir.cwd().createDirPath(io, OUT_DIR);
 
     // FTCS INIT
-    const ftcs_step_sz = [_]f64{ 0.2, 1.0 }; //s
+    const time_step_sz = [_]f64{ 0.2, 1.0 }; //s
     const ftcs_nodes: []f64 = allocator.alloc(f64, IMAX * JMAX) catch |err| {
         std.debug.print("Error allocating memory for ftcs_nodes: {}\n", .{err});
         return err;
@@ -409,7 +591,7 @@ pub fn main(init: std.process.Init) !void {
         return err;
     }; // C
 
-    for (ftcs_step_sz) |dt| {
+    for (time_step_sz) |dt| {
         const result = try ftcs_solve(io, dt, ftcs_nodes, ftcs_nodes_swap);
         print_grid(result.field);
     }
@@ -424,14 +606,28 @@ pub fn main(init: std.process.Init) !void {
     );
     std.debug.print("Analytical Steady State Solution\n", .{});
     print_grid(res_nodes_analytical);
-    write_field(
+    // try, not catch: a missing analytical.csv would silently break F6 and F7 in plot.py
+    try write_field(
         io,
-        "out/analytical.csv",
+        OUT_DIR ++ "/analytical.csv",
         res_nodes_analytical,
         .{ .method = "analytical", .dt = 0, .t = 0 },
-    ) catch |err| {
-        std.debug.print("Failed to write analytical field of nodes to csv. Error: {}\n", .{err});
-    };
+    );
     // ADI
-
+    const adi_current = allocator.alloc(f64, IMAX * JMAX) catch |err| {
+        std.debug.print("Error allocating memory for adi_current. Error: {}\n", .{err});
+        return err;
+    };
+    const adi_star = allocator.alloc(f64, IMAX * JMAX) catch |err| {
+        std.debug.print("Error allocating memory for adi_star. Error: {}\n", .{err});
+        return err;
+    };
+    const adi_next = allocator.alloc(f64, IMAX * JMAX) catch |err| {
+        std.debug.print("Error allocating memory for adi_next. Error: {}\n", .{err});
+        return err;
+    };
+    for (time_step_sz) |dt| {
+        const result: SolveResult = try adi_solve(io, dt, adi_current, adi_star, adi_next);
+        print_grid(result.field);
+    }
 }
