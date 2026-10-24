@@ -16,3 +16,14 @@ figs/
 .idea/
 *.swp
 .DS_Store
+
+# LaTeX build files (keep report.tex, references.bib and the class files)
+documentation/*.aux
+documentation/*.log
+documentation/*.out
+documentation/*.bbl
+documentation/*.blg
+documentation/*.fls
+documentation/*.fdb_latexmk
+documentation/*.synctex.gz
+documentation/*.toc

@@ -385,6 +385,22 @@ def fig_centerline(method="ftcs", dt=0.2):
     savefig(fig, fig_name(method, dt, "centerline"))
 
 
+def fig_analytical():
+    """Baseline: the analytical steady-state field, same levels and colormap as the solver figures."""
+    meta, T = load_field(ANALYTICAL)
+    X, Y = grid(meta)
+    fig, ax = plt.subplots(figsize=(COL_WIDTH, 3.4), constrained_layout=True)
+    cf = ax.contourf(X, Y, T, levels=LEVELS, cmap="inferno")
+    ax.set_aspect("equal")
+    ax.set_xlabel("x (m)")
+    ax.set_ylabel("y (m)")
+    ax.set_title("Analytical steady state")
+    cb = fig.colorbar(cf, ax=ax, shrink=0.9)
+    cb.set_label("T (°C)")
+    cb.set_ticks(np.arange(0, 41, 10))
+    savefig(fig, "fig_analytical")
+
+
 def fig_steady_comparison(method="ftcs", dt=0.2):
     """F6: analytical, numerical steady and the error field."""
     meta, T_a, T_f = load_pair(method, dt)
@@ -447,6 +463,9 @@ def fig_near_wall_error(method="ftcs", dt=0.2):
 # ---------------------------------------------------------------------------
 
 def main(dt=0.2):
+    # Inside main, not at the top: heat_flux imports plot, so a top-level import would be circular
+    from heat_flux import fig_heat_flux
+
     # Every method whose steady file exists gets the full set of checks and figures
     methods = [m for m in METHODS if field_path(m, dt, "steady").exists()]
     have_analytical = ANALYTICAL.exists()
@@ -463,6 +482,8 @@ def main(dt=0.2):
         print("Sanity checks failed; figures may be wrong.", file=sys.stderr)
 
     print("Figures")
+    if have_analytical:
+        fig_analytical()
     for method in methods:
         fig_snapshots(method, dt)
         fig_probes(method, dt)
@@ -473,7 +494,9 @@ def main(dt=0.2):
             fig_steady_comparison(method, dt)
             fig_near_wall_error(method, dt)
     fig_ftcs_instability()
-    # TODO F6c (needs a CONSS = 0.001 run), F8 heat flux and the 3.8 FTCS/ADI overlays
+    if have_analytical and methods:
+        fig_heat_flux(methods, dt)  # F8, all methods on one figure
+    # TODO F6c (needs a CONSS = 0.001 run) and the 3.8 FTCS/ADI overlays
     return 0 if ok else 1
 
 

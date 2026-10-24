@@ -1,0 +1,374 @@
+% Report for the 2-D transient heat conduction project (AIAA conference format).
+%
+% Needs new-aiaa.cls and new-aiaa.bst in this folder. They are not part of TeX Live:
+% open the AIAA template in the Overleaf gallery, "Download as zip", and copy both files here.
+%
+% Build from this folder:   latexmk -pdf report.tex      Clean up:   latexmk -c
+% Figures come from ../figs, written by `.venv/bin/python plot.py` from the project root.
+
+\documentclass[conf]{new-aiaa}
+%\documentclass[journal]{new-aiaa} for journal papers
+\usepackage[utf8]{inputenc}
+
+\usepackage{graphicx}
+\usepackage{amsmath}
+\usepackage{siunitx}
+\usepackage{longtable,tabularx}
+\setlength\LTleft{0pt}
+
+\graphicspath{{../figs/}}
+
+\title{Transient Two-Dimensional Heat Conduction in a Rectangular Bar:\\ Explicit FTCS and ADI Solutions}
+
+
+\author{Samuel R. Denis\footnote{Graduate Student, Department of Aerospace Engineering, Wichita State University.}}
+\affil{Department of Aerospace Engineering, Wichita State University, Wichita, Kansas, 67260}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+The transient temperature field in a long copper bar with fixed wall temperatures is 
+computed with the explicit forward-time, centered-space (FTCS) scheme and 
+the alternating direction implicit (ADI) scheme.
+The steady state is compared with the analytical methods on a grid of 31 x 41.
+With a time step of 0.2s both schemes reach steady-state, which is defined as the total variation in
+temperature per step being less than \SI{0.01}{\degreeCelsius} 
+defined as CONSS after about 410 s of simulated time.
+For both methods the max error is \SI{0.2874}{\degreeCelsius} near the hot corners where the wall discontinuity exists, 
+root-mean-square error of \SI{0.0260}{\degreeCelsius}, mean error of \SI{-0.0011}{\degreeCelsius}.
+With a timestep of 1.0 s, FTCS diverges, as its stability limit predicts, ADI converges in 496 steps. 
+The steady-state wall heat flux satisfies the overall energy balance of the system within \SI{0.1}{\percent}.
+\end{abstract}
+
+\section*{Nomenclature}
+
+{\renewcommand\arraystretch{1.0}
+\noindent\begin{longtable*}{@{}l @{\quad=\quad} l@{}}
+$L$, $W$ & bar length in $x$ and width in $y$, \si{\metre} \\
+$T$ & temperature, \si{\degreeCelsius} \\
+$T_0$ & initial interior temperature, \si{\degreeCelsius} \\
+$T_1$, $T_2$, $T_3$, $T_4$ & bottom, left, top, and right wall temperatures, \si{\degreeCelsius} \\
+$\alpha$ & thermal diffusivity, \si{\metre\squared\per\second} \\
+$k$ & thermal conductivity, \si{\watt\per\metre\per\degreeCelsius} \\
+$t$ & time, \si{\second} \\
+$\Delta t$ & time step, \si{\second} \\
+$\Delta x$, $\Delta y$ & grid spacing in $x$ and $y$, \si{\metre} \\
+$i$, $j$ & grid indices in $x$ and $y$ \\
+$n$ & time level \\
+$d_x$, $d_y$ & FTCS diffusion numbers, $\alpha\Delta t/\Delta x^2$ and $\alpha\Delta t/\Delta y^2$ \\
+$d_1$, $d_2$ & ADI half-step coefficients, $\alpha\Delta t/(2\Delta x^2)$ and $\alpha\Delta t/(2\Delta y^2)$ \\
+$G$ & amplification factor \\
+$\mathrm{TV}$ & total variation, sum of $|T^{n+1}_{i,j} - T^{n}_{i,j}|$ over interior nodes, \si{\degreeCelsius} \\
+$\mathrm{CONSS}$ & steady-state tolerance on TV, \si{\degreeCelsius} \\
+$m$ & series term index \\
+$q_{\mathrm{in}}$ & heat flux into the bar, \si{\watt\per\metre\squared}
+\end{longtable*}}
+
+\section{Introduction}
+This report presents solutions to Problems 3.5 through 3.8 of Hoffmann and Chiang~\cite{hoffmann2000}.
+Problem 3.5 describes transient heat conduction in a long rectangular copper bar, initially at a
+uniform temperature, the four sides are held at constant temperatures. The transient solution is
+computed with the explicit forward-time, centered-space (FTCS) scheme, the alternating direction,
+implicit (ADI) scheme, or the fractional step method (FSM), and the steady state is compared with the
+analytical series solution. The steady-state heat flux is evaluated along the sides $y = 0$, $y = W$, and
+$x = 0$. The ADI method was selected over FSM. Finally, the accuracy, stability, and efficiency of the three schemes are compared. 
+
+\section{Problem Statement}
+% TODO: geometry, material, initial and boundary conditions.
+The geometry shown in Fig.~\ref{fig:geometry} defines the axis system as x-right and y-up
+with the length and width of the bar defined as L and W and respectively. 
+The figure defines the indices i and j in base one 
+whereas in the solution provided all indices are given in base 0 notation with the ends of the bar
+defined as IM and JM respectively. 
+\begin{figure}[hbt!]
+\centering
+\includegraphics[width=.5\textwidth]{Figure-P3_5}
+\caption{Geometry, axes, and boundary conditions of the bar (after Ref.~\cite{hoffmann2000}).}
+\label{fig:geometry}
+\end{figure}
+Fig.~\ref{fig:geometry}
+
+The temperature in the bar satisfies the two-dimensional heat conduction equation
+\begin{equation}
+\label{eq:heat}
+\frac{\partial T}{\partial t} = \alpha \left( \frac{\partial^2 T}{\partial x^2} + \frac{\partial^2 T}{\partial y^2} \right)
+\end{equation}
+on $0 \le x \le L$, $0 \le y \le W$, with $T = T_0$ initially and fixed wall temperatures
+$T(x,0) = T_1$, $T(0,y) = T_2$, $T(x,W) = T_3$, and $T(L,y) = T_4$.
+It is assumed that the solution has reached steady state 
+if the total variation in temperature from one time point to the next is less than CONSS. CONSS is given as 
+\SI{0.01}{\degreeCelsius} in the problem statement. 
+\section{Numerical Methods}
+
+\subsection{Explicit FTCS Scheme}
+% TODO: derivation and stability limit.
+\begin{equation}
+\label{eq:ftcs}
+T^{n+1}_{i,j} = T^{n}_{i,j}
+ + d_x \left( T^{n}_{i+1,j} - 2T^{n}_{i,j} + T^{n}_{i-1,j} \right)
+ + d_y \left( T^{n}_{i,j+1} - 2T^{n}_{i,j} + T^{n}_{i,j-1} \right)
+\end{equation}
+The scheme is stable for $d_x + d_y \le 1/2$.
+
+\subsection{Alternating Direction Implicit Scheme}
+% TODO: derivation; why each half step is tridiagonal; wall values moved into the right-hand side.
+\begin{align}
+\label{eq:adi-x}
+-d_1 T^{*}_{i-1,j} + (1 + 2d_1) T^{*}_{i,j} - d_1 T^{*}_{i+1,j}
+ &= d_2 T^{n}_{i,j-1} + (1 - 2d_2) T^{n}_{i,j} + d_2 T^{n}_{i,j+1} \\
+\label{eq:adi-y}
+-d_2 T^{n+1}_{i,j-1} + (1 + 2d_2) T^{n+1}_{i,j} - d_2 T^{n+1}_{i,j+1}
+ &= d_1 T^{*}_{i-1,j} + (1 - 2d_1) T^{*}_{i,j} + d_1 T^{*}_{i+1,j}
+\end{align}
+
+\subsection{Thomas Algorithm}
+% TODO: forward elimination and back substitution for each tridiagonal line; O(n) cost.
+The ADI method as discussed splits the pentadiagonal system into a pair of tridiagonal systems of equations. The naive approach to solving a system of 
+equations would be to employ gaussian elimination which has a big O complexity of $O(n^3)$. To efficiently 
+solve the special case of a tridiagonal system Eq.~\eqref{eq:tridiag} the Thomas Algorithm [Thomas 1949] was developed. 
+Hoffmann and Chiang~\cite{hoffmann2000} demonstrates the same algorithm in Appendix B. under a different name.
+This approach takes advantage of the zero symmetry about the diagonal to solve the system in $O(n)$ complexity.
+The notation below matches the code provided. 
+% ---------- Tridiagonal system ----------
+\begin{equation}
+  a_k\,x_{k-1} + b_k\,x_k + c_k\,x_{k+1} = d_k,
+  \qquad k = 0, 1, \dots, n-1,
+  \qquad a_0 = c_{n-1} = 0
+  \label{eq:tridiag}
+\end{equation}
+
+% ---------- Matrix form ----------
+\begin{equation}
+  \begin{bmatrix}
+    b_0    & c_0    &        &         &         \\
+    a_1    & b_1    & c_1    &         &         \\
+           & \ddots & \ddots & \ddots  &         \\
+           &        & a_{n-2}& b_{n-2} & c_{n-2} \\
+           &        &        & a_{n-1} & b_{n-1}
+  \end{bmatrix}
+  \begin{bmatrix} x_0 \\ x_1 \\ \vdots \\ x_{n-2} \\ x_{n-1} \end{bmatrix}
+  =
+  \begin{bmatrix} d_0 \\ d_1 \\ \vdots \\ d_{n-2} \\ d_{n-1} \end{bmatrix}
+  \label{eq:tridiag-matrix}
+\end{equation}
+
+Where the $a_k$,$b_k$,$c_k$ is known and $d_k$ is unknown.
+For each time step the inner nodes of a row form a system of equations Eq.~\eqref{eq:tridiag-matrix}.
+The algorithm begins with a linear forwards sweep handling the first equation which does not have $a_k$ 
+by using equations Eq.~\eqref{eq:thomas-first}. Then the rest of the rows forward sweep is solved of the form Eq.~\eqref{eq:thomas-forward}.
+% ---------- Forward sweep ----------
+\begin{equation}
+  s_0 = \frac{c_0}{b_0}, \qquad
+  x'_0 = \frac{d_0}{b_0}
+  \label{eq:thomas-first}
+\end{equation}
+\begin{equation}
+  \left.
+  \begin{aligned}
+    \delta_k &= b_k - a_k\,s_{k-1} \\
+    s_k      &= \frac{c_k}{\delta_k}, \qquad k \le n-2 \\
+    x'_k     &= \frac{d_k - a_k\,x'_{k-1}}{\delta_k}
+  \end{aligned}
+  \right\}
+  \qquad k = 1, 2, \dots, n-1
+  \label{eq:thomas-forward}
+\end{equation}
+The loop completes over the inner nodes and then back substitutes following Eq.~\eqref{eq:thomas-back}.
+% ---------- Back substitution ----------
+\begin{equation}
+  x_{n-1} = x'_{n-1}, \qquad
+  x_k = x'_k - s_k\,x_{k+1}, \qquad k = n-2, n-3, \dots, 0
+  \label{eq:thomas-back}
+\end{equation}
+
+The algorithm returns with the solved rows unknown $d_k$.
+
+\subsection{Analytical Steady-State Solution}
+% TODO: derivation by separation of variables (valid for T_2 = T_4 = 0); truncation criterion.
+The analytical steady state solution provided by the problem statement can be simplified for the case of $T_2 = T_4 = 0$ as Eq.~\eqref{eq:analytical}.
+The solution below is continuous and was evaluated at the same grid of nodes as the solvers for consistency of comparison.
+Numerical stability of the hyperbolic sin had to be taken into account due to double precision floating point overflow.
+The identity $\sinh a / \sinh b = e^{a-b} (1 - e^{-2a}) / (1 - e^{-2b})$, for $0 \le a \le b$, enables the stable calculation of Eq.~\eqref{eq:analytical}.
+
+
+\begin{equation}
+\label{eq:analytical}
+T(x,y) = \sum_{m\ \mathrm{odd}} \frac{4}{m\pi} \sin\!\left(\frac{m\pi x}{L}\right)
+\frac{ T_1 \sinh\!\left[ m\pi (W - y)/L \right] + T_3 \sinh\!\left( m\pi y/L \right) }{ \sinh\!\left( m\pi W/L \right) }
+\end{equation}
+
+\subsection{Convergence and Wall Heat Flux}
+% TODO: steady-state criterion TV < CONSS; second-order one-sided wall gradient and sign convention.
+\begin{equation}
+\label{eq:flux}
+q_{\mathrm{in}} = -k\,\nabla T \cdot \hat{n}_{\mathrm{in}}, \qquad
+\left.\frac{\partial T}{\partial y}\right|_{y=0} \approx \frac{-3T_{i,0} + 4T_{i,1} - T_{i,2}}{2\Delta y}
+\end{equation}
+
+\section{Results}
+% Order: the analytical baseline first, then FTCS, then ADI, then the FTCS/ADI comparison.
+
+\subsection{Analytical Baseline}
+% TODO: the steady-state field every numerical result is compared against; series truncation.
+
+\begin{figure}[hbt!]
+\centering
+\includegraphics[width=.5\textwidth]{fig_analytical}
+\caption{Analytical steady-state temperature field.}
+\label{fig:analytical}
+\end{figure}
+
+\subsection{FTCS}
+
+\subsubsection{Transient Solution}
+% TODO: Part I discussion.
+
+\begin{figure}[hbt!]
+\centering
+\includegraphics[width=\textwidth]{fig_ftcs_dt0.2_snapshots}
+\caption{FTCS temperature field at $t = \SI{10}{\second}$, $t = \SI{40}{\second}$, and steady state, $\Delta t = \SI{0.2}{\second}$.}
+\label{fig:ftcs-snapshots}
+\end{figure}
+
+\begin{figure}[hbt!]
+\centering
+\includegraphics[width=\textwidth]{fig_ftcs_dt0.2_profiles}
+\caption{FTCS temperature versus $y$ at $x = 0$ to \SI{0.30}{\metre} in steps of \SI{0.05}{\metre}, $\Delta t = \SI{0.2}{\second}$.}
+\label{fig:ftcs-profiles}
+\end{figure}
+
+\subsubsection{Stability}
+% TODO: d_x + d_y for each time step; growth rate versus the amplification factor.
+
+\begin{figure}[hbt!]
+\centering
+\includegraphics[width=\textwidth]{fig_ftcs_dt1_instability}
+\caption{FTCS with $\Delta t = \SI{1.0}{\second}$: growth of the probe temperature compared with the amplification factor $|G|^n$, and the first 40 steps.}
+\label{fig:ftcs-instability}
+\end{figure}
+
+\subsubsection{Temperature Histories and Convergence}
+% TODO: Part III discussion; decay rate versus the slowest mode.
+
+\begin{figure}[hbt!]
+\centering
+\includegraphics[width=.5\textwidth]{fig_ftcs_dt0.2_probes}
+\caption{FTCS temperature histories at the three probe locations, $\Delta t = \SI{0.2}{\second}$.}
+\label{fig:ftcs-probes}
+\end{figure}
+
+\begin{figure}[hbt!]
+\centering
+\includegraphics[width=.5\textwidth]{fig_ftcs_dt0.2_convergence}
+\caption{FTCS total variation versus time with the steady-state tolerance and the slowest-mode decay rate.}
+\label{fig:ftcs-convergence}
+\end{figure}
+
+\subsubsection{Steady State Compared with the Analytical Solution}
+% TODO: Part II discussion; error metrics; corner singularity.
+
+\begin{figure}[hbt!]
+\centering
+\includegraphics[width=\textwidth]{fig_ftcs_dt0.2_steady_comparison}
+\caption{Analytical and FTCS steady-state fields and their difference.}
+\label{fig:ftcs-steady-comparison}
+\end{figure}
+
+\begin{figure}[hbt!]
+\centering
+\includegraphics[width=.5\textwidth]{fig_ftcs_dt0.2_centerline}
+\caption{Steady-state temperature along the centerline $x = \SI{0.15}{\metre}$, with the FTCS error.}
+\label{fig:ftcs-centerline}
+\end{figure}
+
+\begin{figure}[hbt!]
+\centering
+\includegraphics[width=.5\textwidth]{fig_ftcs_dt0.2_near_wall_error}
+\caption{FTCS steady-state error along the first interior row, $y = \SI{0.01}{\metre}$.}
+\label{fig:ftcs-near-wall-error}
+\end{figure}
+
+\subsection{ADI}
+
+\subsubsection{Transient Solution}
+% TODO: ADI transient results; agreement with FTCS at t = 10 s and 40 s.
+
+\begin{figure}[hbt!]
+\centering
+\includegraphics[width=\textwidth]{fig_adi_dt0.2_snapshots}
+\caption{ADI temperature field at $t = \SI{10}{\second}$, $t = \SI{40}{\second}$, and steady state, $\Delta t = \SI{0.2}{\second}$.}
+\label{fig:adi-snapshots}
+\end{figure}
+
+\begin{figure}[hbt!]
+\centering
+\includegraphics[width=\textwidth]{fig_adi_dt0.2_profiles}
+\caption{ADI temperature versus $y$ at $x = 0$ to \SI{0.30}{\metre} in steps of \SI{0.05}{\metre}, $\Delta t = \SI{0.2}{\second}$.}
+\label{fig:adi-profiles}
+\end{figure}
+
+\subsubsection{Temperature Histories and Convergence}
+% TODO: ADI histories; convergence at a time step where FTCS is unstable.
+
+\begin{figure}[hbt!]
+\centering
+\includegraphics[width=.5\textwidth]{fig_adi_dt0.2_probes}
+\caption{ADI temperature histories at the three probe locations, $\Delta t = \SI{0.2}{\second}$.}
+\label{fig:adi-probes}
+\end{figure}
+
+\begin{figure}[hbt!]
+\centering
+\includegraphics[width=.5\textwidth]{fig_adi_dt0.2_convergence}
+\caption{ADI total variation versus time with the steady-state tolerance and the slowest-mode decay rate.}
+\label{fig:adi-convergence}
+\end{figure}
+
+\subsubsection{Steady State Compared with the Analytical Solution}
+% TODO: ADI error metrics; same grid error as FTCS.
+
+\begin{figure}[hbt!]
+\centering
+\includegraphics[width=\textwidth]{fig_adi_dt0.2_steady_comparison}
+\caption{Analytical and ADI steady-state fields and their difference.}
+\label{fig:adi-steady-comparison}
+\end{figure}
+
+\begin{figure}[hbt!]
+\centering
+\includegraphics[width=.5\textwidth]{fig_adi_dt0.2_centerline}
+\caption{Steady-state temperature along the centerline $x = \SI{0.15}{\metre}$, with the ADI error.}
+\label{fig:adi-centerline}
+\end{figure}
+
+\subsection{Comparison of FTCS and ADI}
+% TODO: 3.8: accuracy at t = 10 s and 40 s, steps and cost to steady state,
+% ADI at a time step where FTCS is unstable. The overlay figures are not generated yet.
+
+\subsection{Wall Heat Flux}
+% TODO: placement undecided; move this subsection wherever it reads best.
+% Part IV discussion; sign convention; energy balance; corner spikes grow with refinement.
+
+\begin{figure}[hbt!]
+\centering
+\includegraphics[width=\textwidth]{fig_dt0.2_heat_flux}
+\caption{Steady-state heat flux into the bar along the bottom, top, and left walls (top row) and the difference from the analytical field (bottom row). Corners are excluded; the flux there is unbounded.}
+\label{fig:heat-flux}
+\end{figure}
+
+\section{Conclusion}
+% TODO: main findings; do not repeat the abstract.
+
+\section*{Acknowledgments}
+Claude (Anthropic), used through Claude Code, assisted with this work. It supported the writing of the Python
+post-processing and plotting scripts, wrote portions of the output and file-handling code in the Zig solver,
+and reviewed and supported the debugging of the author's implementations of the FTCS, ADI, Thomas, and analytical
+solutions. It also supported the initial \LaTeX{} structure, validation of LaTeX equations, figure captions of this
+report and educated on the AIAA format, which the author revised. The author
+verified all results, wrote the remaining text, and is responsible for all of the content provided.
+
+\bibliography{references}
+
+\end{document}
