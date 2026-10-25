@@ -112,7 +112,7 @@ def write_csv(fluxes, methods, dt):
             s, q_e = fluxes["exact"][wall]
             for i in range(len(s)):
                 vals = [q_e[i], *(fluxes[m][wall][1][i] for m in methods)]
-                f.write(f"{wall},{s[i]!r}," + ",".join(repr(float(v)) for v in vals) + "\n")
+                f.write(f"{wall},{float(s[i])!r}," + ",".join(repr(float(v)) for v in vals) + "\n")
     print(f"  wrote {path}")
 
 

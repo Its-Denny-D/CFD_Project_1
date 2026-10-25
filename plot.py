@@ -235,6 +235,7 @@ def fig_snapshots(method="ftcs", dt=0.2):
         meta, T = load_field(field_path(method, dt, tag))
         X, Y = grid(meta)
         cf = ax.contourf(X, Y, T, levels=LEVELS, cmap="inferno")
+        cf.set_edgecolor("face")  # edges in the fill colour: PDF viewers otherwise show white seams between bands
         ax.set_aspect("equal")
         ax.set_xlabel("x (m)")
         title = "steady state" if tag == "steady" else f"t = {meta['t']:g} s"
@@ -391,6 +392,7 @@ def fig_analytical():
     X, Y = grid(meta)
     fig, ax = plt.subplots(figsize=(COL_WIDTH, 3.4), constrained_layout=True)
     cf = ax.contourf(X, Y, T, levels=LEVELS, cmap="inferno")
+    cf.set_edgecolor("face")  # edges in the fill colour: PDF viewers otherwise show white seams between bands
     ax.set_aspect("equal")
     ax.set_xlabel("x (m)")
     ax.set_ylabel("y (m)")
@@ -418,6 +420,7 @@ def fig_steady_comparison(method="ftcs", dt=0.2):
     cf = None
     for ax, T, title in zip(axes[:2], (T_a, T_f), ("analytical", f"{label(method)} steady")):
         cf = ax.contourf(X, Y, T, levels=LEVELS, cmap="inferno")
+        cf.set_edgecolor("face")  # edges in the fill colour: PDF viewers otherwise show white seams between bands
         ax.set_title(title)
     cb = fig.colorbar(cf, ax=axes[:2], shrink=0.8, location="bottom", pad=0.02)
     cb.set_label("T (°C)")
@@ -426,6 +429,7 @@ def fig_steady_comparison(method="ftcs", dt=0.2):
     levels_e = np.linspace(-lim, lim, 21)
     ce = axes[2].contourf(X, Y, err, levels=levels_e, cmap="RdBu_r",
                           norm=TwoSlopeNorm(vcenter=0.0, vmin=-lim, vmax=lim), extend="both")
+    ce.set_edgecolor("face")  # edges in the fill colour: PDF viewers otherwise show white seams between bands
     axes[2].plot(X[jm, im], Y[jm, im], "k+", ms=7, mew=1.2)
     axes[2].annotate(f"max |e| = {interior[jm - 1, im - 1]:.2f} °C", (X[jm, im], Y[jm, im]),
                      xytext=(0.02, 0.2), textcoords="axes fraction", fontsize=7,

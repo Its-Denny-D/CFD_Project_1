@@ -1,2 +1,2 @@
-numpy
+numpy>=2.0  # np.trapezoid in heat_flux.py
 matplotlib
